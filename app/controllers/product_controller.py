@@ -41,7 +41,7 @@ def create_product():
 
 
     # Validación simple de datos de entrada
-    if not name or not description or not price or not stock is None:
+    if  name is None or  description is None or  price is None or stock is None:
         return jsonify({"error": "Faltan datos requeridos"}), 400
 
     # Crear un nuevo product y guardarlo en la base de datos
