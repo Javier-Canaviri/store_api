@@ -5,3 +5,363 @@ Flask-JWT-Extended
 flask-swagger-ui
 pytest
 pytest-flask
+
+#DATABASE
+from flask_sqlalchemy import SQLAlchemy
+
+db = SQLAlchemy()
+
+
+
+#DECORATORS
+import json
+from functools import wraps
+
+from flask import jsonify
+from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
+
+def jwt_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            verify_jwt_in_request()
+            return fn(*args, **kwargs)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 401
+
+    return wrapper
+
+def roles_required(roles=[]):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                verify_jwt_in_request()
+                current_user = get_jwt_identity()
+                user_roles = json.loads(current_user.get("roles", []))
+                if not set(roles).intersection(user_roles):
+                    return jsonify({"error": "Acceso no autorizado para este rol"}), 403
+                return fn(*args, **kwargs)
+            except Exception as e:
+                return jsonify({"error": str(e)}), 401
+
+        return wrapper
+
+    return decorator
+
+
+
+
+
+#USER M
+import json
+
+from flask_login import UserMixin
+from werkzeug.security import check_password_hash, generate_password_hash
+
+from app.database import db
+
+class User(UserMixin, db.Model):
+    __tablename__ = "users"
+
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)
+    roles = db.Column(db.String(50), nullable=False)
+
+    def __init__(self, username, password, roles=["user"]):
+        self.username = username
+        self.roles = json.dumps(roles)
+        self.password_hash = generate_password_hash(password)
+
+    def save(self):
+        db.session.add(self)
+        db.session.commit()
+
+    # Esta funcion encuentra un usuario por su nombre de usuario
+    @staticmethod
+    def find_by_username(username):
+        return User.query.filter_by(username=username).first()
+
+
+
+
+
+
+
+#PRODUCT M
+from app.database import db
+
+class Product(db.Model):
+    __tablename__ = "products"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.String(100), nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    stock = db.Column(db.Integer, nullable=False)
+    
+    def __init__(self, name, description, price, stock):
+        self.name = name
+        self.description = description
+        self.price = float(price)
+        self.stock=int(stock)
+
+    def save(self):
+        db.session.add(self)
+        db.session.commit()
+
+    @staticmethod
+    def get_all():
+        return Product.query.all()
+
+    @staticmethod
+    def get_by_id(id):
+        return Product.query.get(id)
+
+    def update(self, name=None, description=None, price=None, stock=None):
+        if name is not None:
+            self.name = name
+        if description is not None:
+            self.description = description
+        if price is not None:
+            self.price = price
+        if stock is not None:
+            self.stock=stock
+        db.session.commit()
+
+    def delete(self):
+        db.session.delete(self)
+        db.session.commit()
+
+
+
+
+
+
+
+
+
+#PRODUCT V
+def render_product_list(products):
+    return [
+        {
+            "id": product.id,
+            "name": product.name,
+            "description": product.description,
+            "price": product.price,
+            "stock": product.stock,
+        }
+        for product in products
+    ]
+
+def render_product_detail(product):
+    # Representa los detalles de un product como un diccionario
+    return {
+        "id": product.id,
+        "name": product.name,
+        "description": product.description,
+        "price": product.price,
+        "stock": product.stock,
+    }
+
+
+
+
+
+
+
+
+#USER CONT
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import create_access_token
+from werkzeug.security import check_password_hash
+
+from app.models.user_model import User
+
+user_bp = Blueprint("user", __name__)
+
+
+@user_bp.route("/register", methods=["POST"])
+def register():
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+    roles = data.get("roles")
+
+    if not username or not password:
+        return jsonify({"error": "Se requieren nombre de usuario y contraseña"}), 400
+
+    existing_user = User.find_by_username(username)
+    if existing_user:
+        return jsonify({"error": "El nombre de usuario ya está en uso"}), 400
+
+    new_user = User(username, password, roles)
+    new_user.save()
+
+    return jsonify({"message": "Usuario creado exitosamente"}), 201
+
+@user_bp.route("/login", methods=["POST"])
+def login():
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+
+    user = User.find_by_username(username)
+    if user and check_password_hash(user.password_hash, password):
+        # Si las credenciales son válidas, genera un token JWT
+        access_token = create_access_token(
+            identity={"username": username, "roles": user.roles}
+        )
+        return jsonify(access_token=access_token), 200
+    else:
+        return jsonify({"error": "Credenciales inválidas"}), 401
+
+
+
+
+
+
+
+
+
+
+
+#PRODUCT CONT
+from flask import Blueprint, jsonify, request
+
+from app.models.product_model import Product
+from app.utils.decorators import jwt_required, roles_required
+from app.views.product_view import render_product_detail, render_product_list
+
+# Crear un blueprint para el controlador de productoes
+product_bp = Blueprint("product", __name__)
+
+# Ruta para obtener la lista de productoes
+@product_bp.route("/products", methods=["GET"])
+@jwt_required
+@roles_required(roles=["admin", "user"])
+def get_product():
+    products = Product.get_all()
+    return jsonify(render_product_list(products))
+
+# Ruta para obtener un product específico por su ID
+@product_bp.route("/products/<int:id>", methods=["GET"])
+@jwt_required
+@roles_required(roles=["admin", "user"])
+def get_product_by_id(id):
+    product = Product.get_by_id(id)
+    if product:
+        return jsonify(render_product_detail(product))
+    return jsonify({"error": "Producto no encontrado"}), 404
+
+# Ruta para crear un nuevo product
+@product_bp.route("/products", methods=["POST"])
+@jwt_required
+@roles_required(roles=["admin"])
+def create_product():
+    data = request.json
+    name = data.get("name")
+    description=data.get("description")
+    price=data.get("price")
+    stock=data.get("stock")
+
+    # Validación simple de datos de entrada
+    if  name is None or  description is None or  price is None or stock is None:
+        return jsonify({"error": "Faltan datos requeridos"}), 400
+
+    # Crear un nuevo product y guardarlo en la base de datos
+    product = Product(name=name, description=description, price=price, stock=stock)
+    product.save()
+
+    return jsonify(render_product_detail(product)), 201
+
+# Ruta para actualizar un product existente
+@product_bp.route("/products/<int:id>", methods=["PUT"])
+@jwt_required
+@roles_required(roles=["admin"])
+def update_product(id):
+    product = Product.get_by_id(id)
+
+    if not product:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    data = request.json
+    name = data.get("name")
+    description=data.get("description")
+    price=data.get("price")
+    stock=data.get("stock")
+
+    # Actualizar los datos del product
+    product.update(name=name, description=description, price=price, stock=stock)
+    
+    return jsonify(render_product_detail(product))
+
+# Ruta para eliminar un product existente
+@product_bp.route("/products/<int:id>", methods=["DELETE"])
+@jwt_required
+@roles_required(roles=["admin"])
+def delete_product(id):
+    product = Product.get_by_id(id)
+
+    if not product:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    # Eliminar el product de la base de datos
+    product.delete()
+
+    # Respuesta vacía con código de estado 204 (sin contenido)
+    return "", 204
+
+
+
+
+
+
+
+
+#RUN
+from flask import Flask
+from flask_jwt_extended import JWTManager
+from flask_swagger_ui import get_swaggerui_blueprint
+from app.controllers.user_controller import user_bp
+from app.controllers.product_controller import product_bp
+
+from app.database import db
+
+app = Flask(__name__)
+
+# Configuración de la clave secreta para JWT
+app.config["JWT_SECRET_KEY"] = "tu_clave_secreta_aqui"
+# Configuración de la URL de la documentación OpenAPI
+# Ruta para servir Swagger UI
+SWAGGER_URL = "/api/docs"
+# Ruta de tu archivo OpenAPI/Swagger
+API_URL = "/static/swagger.json"
+
+# Inicializa el Blueprint de Swagger UI
+swagger_ui_blueprint = get_swaggerui_blueprint(
+    SWAGGER_URL, API_URL, config={"app_name": "Tienda Online  API"}
+)
+app.register_blueprint(swagger_ui_blueprint, url_prefix=SWAGGER_URL)
+
+# Configuración de la base de datos
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///products.db"
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+# Inicializa la base de datos
+db.init_app(app)
+
+# Inicializa la extensión JWTManager
+jwt = JWTManager(app)
+
+app.register_blueprint(product_bp, url_prefix="/api")
+app.register_blueprint(user_bp, url_prefix="/api")
+
+# Crea las tablas si no existen
+with app.app_context():
+    db.create_all()
+
+# Ejecuta la aplicación
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=5000,debug=True)
